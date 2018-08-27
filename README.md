@@ -1,7 +1,7 @@
 # streamify
 ffmpeg script to converting Videos for streaming with H264/ACC without noticeable loss in quality.
 
-More info to come, you simply provide a input file. If nothing else is passed, file will be appended with the default TAG
+More info to come, you simply provide an input file. If nothing else is passed, file will be appended with the default TAG
 
 run with -d to see your variables before running
 
