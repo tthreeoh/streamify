@@ -1,0 +1,121 @@
+#!/bin/bash
+#test one
+#default args
+#
+usage()	{
+	echo	"
+	A script utilizing ffmpeg to transcode video files to {x264/acc stereo}.mp4 with userdefined settings
+
+	Flags and defaults:
+	-i <inputfile>
+	-o <outputfile>
+	-d		#Run in debug mode. Display passed variables
+	-m ${TOPT}		#which version of convert to use 1 or 2 default is ${TOPT}
+	-t ${TUNE}	#tune: film animation grain fastdecode zerolatency
+	-p ${PROFILE}		#profile: baseline main high high10 high422 high444
+	-s ${PRESET}	#preset: veryslow slower slow medium fast faster veryfast superfast ultrafast -ffmpeg default is medium
+	-c ${CRF}		#CRF: 0-51 Sane values 18 23 28 Lower is Better quality/Bigger file
+	-b ${bitrate}		#target bitrate in kilobytes buffer and max will be computed to 2x${bitrate}
+	-y		#Overwrite existing file output file if it exist
+	"
+}
+setDefaults(){
+	#export
+	TOPT="1"
+	DEBUG="0"
+	INPUT=""
+	OUTPUT=""
+	oFile=""
+	Extension="mp4"
+	TAG=" - t3o"
+	TUNE="film"
+	PRESET="veryfast"
+	PROFILE="main"
+	CRF="18"
+	bitRate="1500"
+	bufRate=$(echo $bitRate*2 | bc)
+	maxRate=$(echo $bitRate*2 | bc)
+	OVERWRITE="0"
+	OWFLAG=""
+	#terminal colors
+	cD="\e[39m"
+	cR="\e[31m"
+	cB="\e[34m"
+	cG="\e[39m"
+}
+setDefaults #set default variables
+#getARGS()	{
+if [ ""${1}"" = "" ]; then
+	usage;
+	exit;
+	else
+	while	getopts	':mydc:b:i:o:p:s:T:t:r:Q:e:'	OPT;	do
+		case	"${OPT}"	in
+		m)	TOPT="${OPTARG}";;
+		y)	OVERWRITE=1;;
+		c)	CRF="${OPTARG}";;
+		b)	bitRate="${OPTARG}";;
+		i)	INPUT="$OPTARG";;
+		o)	OUTPUT="${OPTARG}"; OUTPUTOPT=1;;
+		e)	Extension="${OPTARG}";;
+		p)	PROFILE="${OPTARG}";;
+		s)	PRESET="${OPTARG}";;
+		T)	TUNE="${OPTARG}";;
+		t)	TAG=" - ${OPTARG}";;
+		r)	REMOVE="${OPTARG}";REMOVEOPT=1;;
+		Q)	QUALITY="${OPTARG}";;
+		d)	DEBUG=1;;
+		*)	usage;	exit	1;;
+		esac
+	done
+	shift	$((OPTIND-1))
+fi
+#
+#getARGS	${@} #call getops function and set user variables
+#set output filename
+case $QUALITY in
+	720)	QUALITYMODE="	-vf scale=-1:720"; TAG=" - 720";;
+esac
+oFile=$(basename "${INPUT}" | sed "s/.[ma][kpv][v4i]/${TAG}.${Extension}/")
+if [ ${#OUTPUT} = 0 ];	then OUTPUT="${oFile}"; else OUTPUT="${OUTPUT}.${Extension}";	fi
+if [ ${#REMOVEOPT} = 1 ]; then OUTPUT=$(basename "${oFile}" | sed -e "s/${REMOVE}//"); fi
+if [ $OVERWRITE = 1 ]; then OWOR="	-y"; fi
+#if [ $RESOLUTION = "720"]; then RESOLUTIONFLAG=" -vf scale=-1:720"
+
+debugDisplay()	{
+	echo	"
+	INPUT=${INPUT}
+	OUTPUT=${OUTPUT}
+	TUNE=${TUNE}
+	PROFILE=${PROFILE}
+	PRESET=${PRESET}
+	CRF=${CRF}
+	OVERWRITE=${OVERWRITE}
+	bitRate=${bitRate}
+	bufRate=${bufRate}
+	maxRate=${maxRate}
+	"
+}
+convert2mp4-1(){
+	ffmpeg	\
+	-i	"$INPUT" \
+	-threads	2	\
+	-profile:v	${PROFILE}	\
+	-movflags	faststart	-preset	${PRESET}	\
+	${QUALITYMODE}	-pix_fmt	yuv420p	\
+	-c:v	libx264	-crf	${CRF}	-tune	${TUNE}	\
+	-b:v	${bitRate}k	-bufsize	${bufRate}k	-maxrate	${maxRate}k	\
+	-af	"aresample=async=1:min_hard_comp=0.100000:first_pts=0"	\
+	-b:a	192K	-ar	44100	-c:a	aac	-ac	2	\
+	${OWOR}	"${OUTPUT}"
+}
+checks()	{
+	if [ "${DEBUG}" = "1" ]; then debugDisplay; exit;
+		elif [ -f ${INPUT} ]; then echo "no movie file?"; usage; exit 1;
+	fi
+}
+main()	{ #main function
+	checks;
+	convert2mp4-1;
+}
+main
