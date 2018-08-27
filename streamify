@@ -9,6 +9,7 @@ usage()	{
 	Flags and defaults:
 	-i <inputfile>
 	-o <outputfile>
+	-e <extension>	default is mp4
 	-d		#Run in debug mode. Display passed variables
 	-m ${TOPT}		#which version of convert to use 1 or 2 default is ${TOPT}
 	-t ${TUNE}	#tune: film animation grain fastdecode zerolatency
