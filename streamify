@@ -27,7 +27,7 @@ setDefaults(){
 	OUTPUT=""
 	oFile=""
 	Extension="mp4"
-	TAG=" - t3o"
+	TAG=" - streamified"
 	TUNE="film"
 	PRESET="veryfast"
 	PROFILE="main"
