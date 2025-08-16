@@ -1,122 +1,204 @@
 #!/bin/bash
-#test one
-#default args
-#
-usage()	{
-	echo	"
-	A script utilizing ffmpeg to transcode video files to {x264/acc stereo}.mp4 with userdefined settings
+# Video transcoding script using ffmpeg
+# Converts video files to x264/AAC stereo MP4 with user-defined settings
 
-	Flags and defaults:
-	-i <inputfile>
-	-o <outputfile>
-	-e <extension>	default is mp4
-	-d		#Run in debug mode. Display passed variables
-	-m ${TOPT}		#which version of convert to use 1 or 2 default is ${TOPT}
-	-t ${TUNE}	#tune: film animation grain fastdecode zerolatency
-	-p ${PROFILE}		#profile: baseline main high high10 high422 high444
-	-s ${PRESET}	#preset: veryslow slower slow medium fast faster veryfast superfast ultrafast -ffmpeg default is medium
-	-c ${CRF}		#CRF: 0-51 Sane values 18 23 28 Lower is Better quality/Bigger file
-	-b ${bitrate}		#target bitrate in kilobytes buffer and max will be computed to 2x${bitrate}
-	-y		#Overwrite existing file output file if it exist
-	"
+usage() {
+    echo "
+    A script utilizing ffmpeg to transcode video files to {x264/aac stereo}.mp4 with user-defined settings
+
+    Flags and defaults:
+    -i <inputfile>      Input video file (required)
+    -o <outputfile>     Output filename (optional)
+    -e <extension>      Output extension (default: mp4)
+    -d                  Run in debug mode. Display passed variables
+    -t <tune>           Tune: film animation grain fastdecode zerolatency (default: film)
+    -p <profile>        Profile: baseline main high high10 high422 high444 (default: main)
+    -s <preset>         Preset: veryslow slower slow medium fast faster veryfast superfast ultrafast (default: veryfast)
+    -c <crf>            CRF: 0-51 Sane values 18 23 28 Lower is better quality/bigger file (default: 18)
+    -b <bitrate>        Target bitrate in kilobytes, buffer and max will be 2x this value (default: 1500)
+    -Q <quality>        Quality preset: 720 (scales to 720p)
+    -T <tag>            Custom tag to add to filename
+    -r <remove>         String to remove from output filename
+    -y                  Overwrite existing output file if it exists
+    "
 }
-setDefaults(){
-	#export
-	TOPT="1"
-	DEBUG="0"
-	INPUT=""
-	OUTPUT=""
-	oFile=""
-	Extension="mp4"
-	TAG=" - streamified"
-	TUNE="film"
-	PRESET="veryfast"
-	PROFILE="main"
-	CRF="18"
-	bitRate="1500"
-	bufRate=$(echo $bitRate*2 | bc)
-	maxRate=$(echo $bitRate*2 | bc)
-	OVERWRITE="0"
-	OWFLAG=""
-	#terminal colors
-	cD="\e[39m"
-	cR="\e[31m"
-	cB="\e[34m"
-	cG="\e[39m"
+
+setDefaults() {
+    DEBUG="0"
+    INPUT=""
+    OUTPUT=""
+    oFile=""
+    Extension="mp4"
+    TAG=" - streamified"
+    TUNE="film"
+    PRESET="veryfast"
+    PROFILE="main"
+    CRF="18"
+    bitRate="1500"
+    bufRate=$((bitRate * 2))
+    maxRate=$((bitRate * 2))
+    OVERWRITE="0"
+    OWFLAG=""
+    QUALITYMODE=""
+    OUTPUTOPT=""
+    REMOVEOPT=""
+    REMOVE=""
+    QUALITY=""
+    
+    # Terminal colors (for future use)
+    cD="\e[39m"
+    cR="\e[31m"
+    cB="\e[34m"
+    cG="\e[32m"
 }
-setDefaults #set default variables
-#getARGS()	{
-if [ ""${1}"" = "" ]; then
-	usage;
-	exit;
-	else
-	while	getopts	':mydc:b:i:o:p:s:T:t:r:Q:e:'	OPT;	do
-		case	"${OPT}"	in
-		m)	TOPT="${OPTARG}";;
-		y)	OVERWRITE=1;;
-		c)	CRF="${OPTARG}";;
-		b)	bitRate="${OPTARG}";;
-		i)	INPUT="$OPTARG";;
-		o)	OUTPUT="${OPTARG}"; OUTPUTOPT=1;;
-		e)	Extension="${OPTARG}";;
-		p)	PROFILE="${OPTARG}";;
-		s)	PRESET="${OPTARG}";;
-		T)	TUNE="${OPTARG}";;
-		t)	TAG=" - ${OPTARG}";;
-		r)	REMOVE="${OPTARG}";REMOVEOPT=1;;
-		Q)	QUALITY="${OPTARG}";;
-		d)	DEBUG=1;;
-		*)	usage;	exit	1;;
-		esac
-	done
-	shift	$((OPTIND-1))
+
+setDefaults # Set default variables
+
+# Parse command line arguments
+if [ "${1}" = "" ]; then
+    usage
+    exit 1
+else
+    while getopts ':ydc:b:i:o:p:s:T:t:r:Q:e:' OPT; do
+        case "${OPT}" in
+            y) OVERWRITE=1;;
+            c) CRF="${OPTARG}";;
+            b) bitRate="${OPTARG}"
+               bufRate=$((bitRate * 2))
+               maxRate=$((bitRate * 2));;
+            i) INPUT="$OPTARG";;
+            o) OUTPUT="${OPTARG}"; OUTPUTOPT=1;;
+            e) Extension="${OPTARG}";;
+            p) PROFILE="${OPTARG}";;
+            s) PRESET="${OPTARG}";;
+            T) TUNE="${OPTARG}";;
+            t) TAG=" - ${OPTARG}";;
+            r) REMOVE="${OPTARG}"; REMOVEOPT=1;;
+            Q) QUALITY="${OPTARG}";;
+            d) DEBUG=1;;
+            *) usage; exit 1;;
+        esac
+    done
+    shift $((OPTIND-1))
 fi
-#
-#getARGS	${@} #call getops function and set user variables
-#set output filename
-case $QUALITY in
-	720)	QUALITYMODE="	-vf scale=-1:720"; TAG=" - 720";;
-esac
-oFile=$(basename "${INPUT}" | sed "s/.[ma][kpv][v4i]/${TAG}.${Extension}/")
-if [ ${#OUTPUT} = 0 ];	then OUTPUT="${oFile}"; else OUTPUT="${OUTPUT}.${Extension}";	fi
-if [ ${#REMOVEOPT} = 1 ]; then OUTPUT=$(basename "${oFile}" | sed -e "s/${REMOVE}//"); fi
-if [ $OVERWRITE = 1 ]; then OWOR="	-y"; fi
-#if [ $RESOLUTION = "720"]; then RESOLUTIONFLAG=" -vf scale=-1:720"
 
-debugDisplay()	{
-	echo	"
-	INPUT=${INPUT}
-	OUTPUT=${OUTPUT}
-	TUNE=${TUNE}
-	PROFILE=${PROFILE}
-	PRESET=${PRESET}
-	CRF=${CRF}
-	OVERWRITE=${OVERWRITE}
-	bitRate=${bitRate}
-	bufRate=${bufRate}
-	maxRate=${maxRate}
-	"
+# Set quality mode
+case $QUALITY in
+    720) QUALITYMODE="-vf scale=-1:720"; TAG=" - 720";;
+esac
+
+# Generate output filename
+oFile=$(basename "${INPUT}" | sed "s/\.[^.]*$/${TAG}.${Extension}/")
+
+if [ -z "$OUTPUT" ]; then 
+    OUTPUT="${oFile}"
+else 
+    OUTPUT="${OUTPUT}.${Extension}"
+fi
+
+if [ -n "$REMOVEOPT" ]; then 
+    OUTPUT=$(basename "${oFile}" | sed -e "s/${REMOVE}//")
+fi
+
+if [ "$OVERWRITE" = "1" ]; then 
+    OWFLAG="-y"
+fi
+
+debugDisplay() {
+    echo "
+    INPUT=${INPUT}
+    OUTPUT=${OUTPUT}
+    TUNE=${TUNE}
+    PROFILE=${PROFILE}
+    PRESET=${PRESET}
+    CRF=${CRF}
+    OVERWRITE=${OVERWRITE}
+    bitRate=${bitRate}
+    bufRate=${bufRate}
+    maxRate=${maxRate}
+    QUALITYMODE=${QUALITYMODE}
+    Extension=${Extension}
+    "
 }
-convert2mp4-1(){
-	ffmpeg	\
-	-i	"$INPUT" \
-	-threads	2	\
-	-profile:v	${PROFILE}	\
-	-movflags	faststart	-preset	${PRESET}	\
-	${QUALITYMODE}	-pix_fmt	yuv420p	\
-	-c:v	libx264	-crf	${CRF}	-tune	${TUNE}	\
-	-b:v	${bitRate}k	-bufsize	${bufRate}k	-maxrate	${maxRate}k	\
-	-af	"aresample=async=1:min_hard_comp=0.100000:first_pts=0"	\
-	-b:a	192K	-ar	44100	-c:a	aac	-ac	2	\
-	${OWOR}	"${OUTPUT}"
+
+convert2mp4() {
+    echo "Converting: ${INPUT} -> ${OUTPUT}"
+    
+    ffmpeg \
+        -i "$INPUT" \
+        -threads 2 \
+        -profile:v "${PROFILE}" \
+        -movflags faststart \
+        -preset "${PRESET}" \
+        ${QUALITYMODE} \
+        -pix_fmt yuv420p \
+        -c:v libx264 \
+        -crf "${CRF}" \
+        -tune "${TUNE}" \
+        -b:v "${bitRate}k" \
+        -bufsize "${bufRate}k" \
+        -maxrate "${maxRate}k" \
+        -af "aresample=async=1:min_hard_comp=0.100000:first_pts=0" \
+        -b:a 192K \
+        -ar 44100 \
+        -c:a aac \
+        -ac 2 \
+        ${OWFLAG} \
+        "${OUTPUT}"
+    
+    if [ $? -eq 0 ]; then
+        echo -e "${cG}Conversion completed successfully!${cD}"
+        echo "Output file: ${OUTPUT}"
+        
+        # Display file sizes
+        if command -v du >/dev/null 2>&1; then
+            echo "Input size:  $(du -h "${INPUT}" | cut -f1)"
+            echo "Output size: $(du -h "${OUTPUT}" | cut -f1)"
+        fi
+    else
+        echo -e "${cR}Conversion failed!${cD}"
+        exit 1
+    fi
 }
-checks()	{
-	if [ "${DEBUG}" = "1" ]; then debugDisplay; exit;
-		elif [ -f ${INPUT} ]; then echo "no movie file?"; usage; exit 1;
-	fi
+
+checks() {
+    if [ "${DEBUG}" = "1" ]; then 
+        debugDisplay
+        exit 0
+    fi
+    
+    if [ -z "${INPUT}" ]; then
+        echo -e "${cR}Error: No input file specified${cD}"
+        usage
+        exit 1
+    fi
+    
+    if [ ! -f "${INPUT}" ]; then
+        echo -e "${cR}Error: Input file '${INPUT}' does not exist${cD}"
+        exit 1
+    fi
+    
+    if [ ! -r "${INPUT}" ]; then
+        echo -e "${cR}Error: Cannot read input file '${INPUT}'${cD}"
+        exit 1
+    fi
+    
+    # Check if output file exists and overwrite is not set
+    if [ -f "${OUTPUT}" ] && [ "${OVERWRITE}" != "1" ]; then
+        echo -e "${cR}Error: Output file '${OUTPUT}' already exists. Use -y to overwrite${cD}"
+        exit 1
+    fi
+    
+    # Check if ffmpeg is available
+    if ! command -v ffmpeg >/dev/null 2>&1; then
+        echo -e "${cR}Error: ffmpeg is not installed or not in PATH${cD}"
+        exit 1
+    fi
 }
-main()	{ #main function
-	checks;
-	convert2mp4-1;
+
+main() {
+    checks
+    convert2mp4
 }
+
 main
