@@ -1,204 +1,691 @@
 #!/bin/bash
-# Video transcoding script using ffmpeg
-# Converts video files to x264/AAC stereo MP4 with user-defined settings
+set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
-usage() {
-    echo "
-    A script utilizing ffmpeg to transcode video files to {x264/aac stereo}.mp4 with user-defined settings
+# Modern video transcoding script using ffmpeg
+# Converts video files to modern codecs with intelligent defaults
 
-    Flags and defaults:
-    -i <inputfile>      Input video file (required)
-    -o <outputfile>     Output filename (optional)
-    -e <extension>      Output extension (default: mp4)
-    -d                  Run in debug mode. Display passed variables
-    -t <tune>           Tune: film animation grain fastdecode zerolatency (default: film)
-    -p <profile>        Profile: baseline main high high10 high422 high444 (default: main)
-    -s <preset>         Preset: veryslow slower slow medium fast faster veryfast superfast ultrafast (default: veryfast)
-    -c <crf>            CRF: 0-51 Sane values 18 23 28 Lower is better quality/bigger file (default: 18)
-    -b <bitrate>        Target bitrate in kilobytes, buffer and max will be 2x this value (default: 1500)
-    -Q <quality>        Quality preset: 720 (scales to 720p)
-    -T <tag>            Custom tag to add to filename
-    -r <remove>         String to remove from output filename
-    -y                  Overwrite existing output file if it exists
-    "
-}
+readonly SCRIPT_NAME="$(basename "$0")"
+readonly VERSION="2.0"
 
-setDefaults() {
-    DEBUG="0"
-    INPUT=""
-    OUTPUT=""
-    oFile=""
-    Extension="mp4"
-    TAG=" - streamified"
-    TUNE="film"
-    PRESET="veryfast"
-    PROFILE="main"
-    CRF="18"
-    bitRate="1500"
-    bufRate=$((bitRate * 2))
-    maxRate=$((bitRate * 2))
-    OVERWRITE="0"
-    OWFLAG=""
-    QUALITYMODE=""
-    OUTPUTOPT=""
-    REMOVEOPT=""
-    REMOVE=""
-    QUALITY=""
+# Color codes
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly YELLOW='\033[1;33m'
+readonly BLUE='\033[0;34m'
+readonly PURPLE='\033[0;35m'
+readonly CYAN='\033[0;36m'
+readonly NC='\033[0m' # No Color
+
+# Default configuration
+declare -A CONFIG=(
+    [input]=""
+    [output]=""
+    [extension]="mp4"
+    [codec]="x264"          # x264, x265, av1
+    [preset]="medium"       # ultrafast, superfast, veryfast, faster, fast, medium, slow, slower, veryslow
+    [crf]="23"              # 0-51 for x264/x265, 15-63 for AV1
+    [tune]="none"           # film, animation, grain, stillimage, fastdecode, zerolatency
+    [profile]="auto"        # auto, baseline, main, high
+    [audio_codec]="aac"     # aac, opus, mp3
+    [audio_bitrate]="128"   # kbps
+    [scale]=""              # e.g., "1920:1080", "1280:720"
+    [fps]=""                # target fps
+    [two_pass]="false"      # true/false
+    [hdr]="false"           # preserve HDR
+    [overwrite]="false"
+    [debug]="false"
+    [hardware]="false"      # use hardware acceleration
+    [tag]="transcoded"
+    [recursive]="false"     # process subdirectories
+    [parallel]="1"          # number of parallel jobs
+    [skip_existing]="true"  # skip if output already exists
+    [min_size]="10"         # minimum file size in MB
+    [extensions]="mp4,mkv,avi,mov,wmv,flv,webm,m4v,mpg,mpeg,ts,mts,m2ts"
+)
+
+# Statistics tracking
+declare -A STATS=(
+    [total_files]=0
+    [processed]=0
+    [skipped]=0
+    [failed]=0
+    [total_input_size]=0
+    [total_output_size]=0
+    [start_time]=0
+)
+
+show_usage() {
+    cat << EOF
+${PURPLE}${SCRIPT_NAME} v${VERSION}${NC} - Modern Video Transcoding
+
+${CYAN}USAGE:${NC}
+    $SCRIPT_NAME -i input.mkv [options]                    # Single file
+    $SCRIPT_NAME -i /path/to/videos/ [options]             # Directory
+    $SCRIPT_NAME -i /path/to/videos/ -R [options]          # Directory + subdirectories
+
+${CYAN}REQUIRED:${NC}
+    -i <path>       Input video file or directory
+
+${CYAN}DIRECTORY OPTIONS:${NC}
+    -R, --recursive Process subdirectories recursively
+    -j <num>        Number of parallel jobs (default: 1)
+    -S              Process existing output files (default: skip)
+    --min-size <MB> Minimum file size to process (default: 10MB)
+    --ext <list>    Video extensions to process (default: mp4,mkv,avi,mov...)
+
+${CYAN}CODEC OPTIONS:${NC}
+    -c <codec>      Video codec: x264 (default), x265, av1
+    -q <crf>        Quality (CRF): 0-51 for x264/x265, 15-63 for AV1 (default: 23)
+    -p <preset>     Encoding preset: ultrafast to veryslow (default: medium)
+    -t <tune>       Tune for content: film, animation, grain (default: none)
+
+${CYAN}OUTPUT OPTIONS:${NC}
+    -o <path>       Output file/directory (auto-generated if not specified)
+    -e <ext>        Output extension (default: mp4)
+    -T <tag>        Custom tag for filename (default: transcoded)
+
+${CYAN}VIDEO OPTIONS:${NC}
+    -s <scale>      Scale video (e.g., 1920:1080, 1280:720, 50% for percentage)
+    -r <fps>        Target frame rate
+    --hdr           Preserve HDR metadata (x265/av1 only)
+    --2pass         Enable two-pass encoding
+
+${CYAN}AUDIO OPTIONS:${NC}
+    -a <codec>      Audio codec: aac (default), opus, mp3
+    -b <bitrate>    Audio bitrate in kbps (default: 128)
+
+${CYAN}HARDWARE:${NC}
+    --hw            Enable hardware acceleration (NVENC/QSV/VAAPI)
+
+${CYAN}OTHER:${NC}
+    -y              Overwrite output files
+    -d              Debug mode (show settings and exit)
+    -h, --help      Show this help
+    -v, --version   Show version
+
+${CYAN}SINGLE FILE EXAMPLES:${NC}
+    # Basic transcode to x264
+    $SCRIPT_NAME -i movie.mkv
     
-    # Terminal colors (for future use)
-    cD="\e[39m"
-    cR="\e[31m"
-    cB="\e[34m"
-    cG="\e[32m"
+    # High quality x265 encode
+    $SCRIPT_NAME -i movie.mkv -c x265 -q 20 -p slow
+
+${CYAN}DIRECTORY EXAMPLES:${NC}
+    # Process all videos in directory
+    $SCRIPT_NAME -i ./movies/
+    
+    # Recursive processing with parallel jobs
+    $SCRIPT_NAME -i ./media/ -R -j 4
+    
+    # Batch convert to x265 with custom output directory
+    $SCRIPT_NAME -i ./input/ -o ./output/ -c x265 -q 22
+    
+    # Process only large files (>100MB) recursively
+    $SCRIPT_NAME -i ./videos/ -R --min-size 100 -j 2
+
+EOF
 }
 
-setDefaults # Set default variables
+log() {
+    local level=$1
+    shift
+    case $level in
+        ERROR) echo -e "${RED}[ERROR]${NC} $*" >&2 ;;
+        WARN)  echo -e "${YELLOW}[WARN]${NC} $*" >&2 ;;
+        INFO)  echo -e "${GREEN}[INFO]${NC} $*" ;;
+        DEBUG) [[ ${CONFIG[debug]} == "true" ]] && echo -e "${BLUE}[DEBUG]${NC} $*" ;;
+    esac
+}
 
-# Parse command line arguments
-if [ "${1}" = "" ]; then
-    usage
-    exit 1
-else
-    while getopts ':ydc:b:i:o:p:s:T:t:r:Q:e:' OPT; do
-        case "${OPT}" in
-            y) OVERWRITE=1;;
-            c) CRF="${OPTARG}";;
-            b) bitRate="${OPTARG}"
-               bufRate=$((bitRate * 2))
-               maxRate=$((bitRate * 2));;
-            i) INPUT="$OPTARG";;
-            o) OUTPUT="${OPTARG}"; OUTPUTOPT=1;;
-            e) Extension="${OPTARG}";;
-            p) PROFILE="${OPTARG}";;
-            s) PRESET="${OPTARG}";;
-            T) TUNE="${OPTARG}";;
-            t) TAG=" - ${OPTARG}";;
-            r) REMOVE="${OPTARG}"; REMOVEOPT=1;;
-            Q) QUALITY="${OPTARG}";;
-            d) DEBUG=1;;
-            *) usage; exit 1;;
+die() {
+    log ERROR "$1"
+    exit "${2:-1}"
+}
+
+check_dependencies() {
+    local deps=("ffmpeg" "ffprobe")
+    
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &> /dev/null; then
+            die "$dep is required but not installed"
+        fi
+    done
+    
+    log DEBUG "Dependencies check passed"
+}
+
+detect_hardware() {
+    local hw_encoders=()
+    
+    # Check for NVIDIA
+    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "h264_nvenc\|hevc_nvenc\|av1_nvenc"; then
+        hw_encoders+=("nvenc")
+    fi
+    
+    # Check for Intel QSV
+    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "h264_qsv\|hevc_qsv\|av1_qsv"; then
+        hw_encoders+=("qsv")
+    fi
+    
+    # Check for VAAPI
+    if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "h264_vaapi\|hevc_vaapi\|av1_vaapi"; then
+        hw_encoders+=("vaapi")
+    fi
+    
+    if [[ ${#hw_encoders[@]} -gt 0 ]]; then
+        log DEBUG "Available hardware encoders: ${hw_encoders[*]}"
+        echo "${hw_encoders[0]}"  # Return first available
+    else
+        echo "none"
+    fi
+}
+
+get_video_info() {
+    local input_file=$1
+    local info
+    
+    info=$(ffprobe -v quiet -print_format json -show_format -show_streams "$input_file" 2>/dev/null) \
+        || die "Failed to analyze input file: $input_file"
+    
+    echo "$info"
+}
+
+build_ffmpeg_command() {
+    local -a cmd=("ffmpeg")
+    
+    # Input
+    cmd+=("-i" "${CONFIG[input]}")
+    
+    # Hardware acceleration
+    if [[ ${CONFIG[hardware]} == "true" ]]; then
+        local hw_type
+        hw_type=$(detect_hardware)
+        if [[ $hw_type != "none" ]]; then
+            case $hw_type in
+                nvenc) cmd+=("-hwaccel" "cuda") ;;
+                qsv) cmd+=("-hwaccel" "qsv") ;;
+                vaapi) cmd+=("-hwaccel" "vaapi") ;;
+            esac
+            log INFO "Using hardware acceleration: $hw_type"
+        else
+            log WARN "Hardware acceleration requested but not available"
+        fi
+    fi
+    
+    # Video codec and settings
+    case ${CONFIG[codec]} in
+        x264)
+            if [[ ${CONFIG[hardware]} == "true" ]] && detect_hardware | grep -q "nvenc"; then
+                cmd+=("-c:v" "h264_nvenc")
+            else
+                cmd+=("-c:v" "libx264")
+            fi
+            ;;
+        x265)
+            if [[ ${CONFIG[hardware]} == "true" ]] && detect_hardware | grep -q "nvenc"; then
+                cmd+=("-c:v" "hevc_nvenc")
+            else
+                cmd+=("-c:v" "libx265")
+            fi
+            ;;
+        av1)
+            cmd+=("-c:v" "libsvtav1")  # or libaom-av1
+            ;;
+    esac
+    
+    # Quality settings
+    cmd+=("-crf" "${CONFIG[crf]}")
+    cmd+=("-preset" "${CONFIG[preset]}")
+    
+    if [[ ${CONFIG[tune]} != "none" ]]; then
+        cmd+=("-tune" "${CONFIG[tune]}")
+    fi
+    
+    # Profile (auto-detect if not specified)
+    if [[ ${CONFIG[profile]} != "auto" ]]; then
+        cmd+=("-profile:v" "${CONFIG[profile]}")
+    fi
+    
+    # Video filters
+    local -a filters=()
+    
+    if [[ -n ${CONFIG[scale]} ]]; then
+        if [[ ${CONFIG[scale]} == *"%" ]]; then
+            # Percentage scaling
+            local percent=${CONFIG[scale]%\%}
+            filters+=("scale=iw*${percent}/100:ih*${percent}/100")
+        else
+            filters+=("scale=${CONFIG[scale]}")
+        fi
+    fi
+    
+    if [[ -n ${CONFIG[fps]} ]]; then
+        filters+=("fps=${CONFIG[fps]}")
+    fi
+    
+    if [[ ${#filters[@]} -gt 0 ]]; then
+        local filter_string
+        filter_string=$(IFS=,; echo "${filters[*]}")
+        cmd+=("-vf" "$filter_string")
+    fi
+    
+    # HDR preservation
+    if [[ ${CONFIG[hdr]} == "true" ]] && [[ ${CONFIG[codec]} != "x264" ]]; then
+        cmd+=("-color_primaries" "bt2020" "-color_trc" "smpte2084" "-colorspace" "bt2020nc")
+    fi
+    
+    # Audio codec
+    case ${CONFIG[audio_codec]} in
+        aac) cmd+=("-c:a" "aac" "-b:a" "${CONFIG[audio_bitrate]}k") ;;
+        opus) cmd+=("-c:a" "libopus" "-b:a" "${CONFIG[audio_bitrate]}k") ;;
+        mp3) cmd+=("-c:a" "libmp3lame" "-b:a" "${CONFIG[audio_bitrate]}k") ;;
+    esac
+    
+    # Output options
+    cmd+=("-movflags" "+faststart")  # Web-optimized
+    
+    if [[ ${CONFIG[overwrite]} == "true" ]]; then
+        cmd+=("-y")
+    fi
+    
+    # Output file
+    cmd+=("${CONFIG[output]}")
+    
+    echo "${cmd[@]}"
+}
+
+find_video_files() {
+    local search_path=$1
+    local -a find_args=()
+    
+    if [[ ${CONFIG[recursive]} == "true" ]]; then
+        find_args+=("$search_path")
+    else
+        find_args+=("$search_path" "-maxdepth" "1")
+    fi
+    
+    find_args+=("-type" "f")
+    
+    # Build extension filter
+    local -a ext_patterns=()
+    IFS=',' read -ra extensions <<< "${CONFIG[extensions]}"
+    for ext in "${extensions[@]}"; do
+        ext_patterns+=("-iname" "*.${ext// /}")
+    done
+    
+    # Combine with OR logic
+    if [[ ${#ext_patterns[@]} -gt 2 ]]; then
+        find_args+=("(" "${ext_patterns[@]}" ")")
+    else
+        find_args+=("${ext_patterns[@]}")
+    fi
+    
+    find "${find_args[@]}" 2>/dev/null | sort
+}
+
+filter_by_size() {
+    local file=$1
+    local min_bytes=$((CONFIG[min_size] * 1024 * 1024))
+    local file_size
+    
+    if [[ -f $file ]]; then
+        file_size=$(stat -f%z "$file" 2>/dev/null || stat -c%s "$file" 2>/dev/null)
+        [[ $file_size -ge $min_bytes ]]
+    else
+        false
+    fi
+}
+
+should_skip_file() {
+    local input_file=$1
+    local output_file
+    
+    output_file=$(generate_output_filename_for_file "$input_file")
+    
+    # Skip if output exists and we're not overwriting
+    if [[ -f $output_file ]] && [[ ${CONFIG[skip_existing]} == "true" ]] && [[ ${CONFIG[overwrite]} != "true" ]]; then
+        return 0  # true, should skip
+    fi
+    
+    # Skip if file is too small
+    if ! filter_by_size "$input_file"; then
+        return 0  # true, should skip
+    fi
+    
+    return 1  # false, should process
+}
+
+generate_output_filename_for_file() {
+    local input_file=$1
+    local base_name output_name output_dir
+    
+    base_name=$(basename "$input_file")
+    base_name="${base_name%.*}"  # Remove extension
+    
+    if [[ -d ${CONFIG[input]} ]] && [[ -n ${CONFIG[output]} ]] && [[ -d ${CONFIG[output]} ]]; then
+        # Directory to directory mapping
+        local rel_path
+        rel_path=$(realpath --relative-to="${CONFIG[input]}" "$(dirname "$input_file")")
+        output_dir="${CONFIG[output]}/${rel_path}"
+        mkdir -p "$output_dir"
+        output_name="${output_dir}/${base_name}_${CONFIG[tag]}.${CONFIG[extension]}"
+    elif [[ -d ${CONFIG[input]} ]]; then
+        # Same directory as input
+        output_dir=$(dirname "$input_file")
+        output_name="${output_dir}/${base_name}_${CONFIG[tag]}.${CONFIG[extension]}"
+    else
+        # Single file mode
+        if [[ -n ${CONFIG[output]} ]]; then
+            output_name="${CONFIG[output]}"
+        else
+            output_name="${base_name}_${CONFIG[tag]}"
+        fi
+        
+        # Add extension if not present
+        if [[ $output_name != *.* ]]; then
+            output_name="${output_name}.${CONFIG[extension]}"
+        fi
+    fi
+    
+    echo "$output_name"
+}
+
+process_single_file() {
+    local input_file=$1
+    local output_file job_id="${2:-}"
+    
+    output_file=$(generate_output_filename_for_file "$input_file")
+    
+    local prefix=""
+    [[ -n $job_id ]] && prefix="[Job $job_id] "
+    
+    log INFO "${prefix}Processing: $(basename "$input_file")"
+    
+    if should_skip_file "$input_file"; then
+        local reason="unknown"
+        if [[ -f $output_file ]]; then
+            reason="output exists"
+        elif ! filter_by_size "$input_file"; then
+            reason="file too small (<${CONFIG[min_size]}MB)"
+        fi
+        log INFO "${prefix}Skipped: $reason"
+        ((STATS[skipped]++))
+        return 0
+    fi
+    
+    # Temporarily override CONFIG for this file
+    local orig_input="${CONFIG[input]}"
+    local orig_output="${CONFIG[output]}"
+    CONFIG[input]="$input_file"
+    CONFIG[output]="$output_file"
+    
+    local start_time end_time duration
+    start_time=$(date +%s)
+    
+    # Build and execute ffmpeg command
+    local cmd
+    cmd=$(build_ffmpeg_command)
+    
+    if [[ ${CONFIG[debug]} == "true" ]]; then
+        log DEBUG "${prefix}Command: $cmd"
+    fi
+    
+    local success=false
+    if eval "$cmd" 2>/dev/null; then
+        end_time=$(date +%s)
+        duration=$((end_time - start_time))
+        
+        log INFO "${prefix}Completed in ${duration}s: $(basename "$output_file")"
+        
+        # Update statistics
+        ((STATS[processed]++))
+        if command -v stat &> /dev/null; then
+            local input_size output_size
+            input_size=$(stat -f%z "$input_file" 2>/dev/null || stat -c%s "$input_file" 2>/dev/null || echo 0)
+            output_size=$(stat -f%z "$output_file" 2>/dev/null || stat -c%s "$output_file" 2>/dev/null || echo 0)
+            STATS[total_input_size]=$((STATS[total_input_size] + input_size))
+            STATS[total_output_size]=$((STATS[total_output_size] + output_size))
+        fi
+        success=true
+    else
+        log ERROR "${prefix}Failed: $(basename "$input_file")"
+        ((STATS[failed]++))
+    fi
+    
+    # Restore CONFIG
+    CONFIG[input]="$orig_input"
+    CONFIG[output]="$orig_output"
+    
+    $success
+}
+
+process_directory() {
+    local input_dir=$1
+    
+    log INFO "Scanning directory: $input_dir"
+    [[ ${CONFIG[recursive]} == "true" ]] && log INFO "Recursive mode enabled"
+    
+    # Find all video files
+    local -a video_files=()
+    while IFS= read -r -d '' file; do
+        video_files+=("$file")
+    done < <(find_video_files "$input_dir" | tr '\n' '\0')
+    
+    if [[ ${#video_files[@]} -eq 0 ]]; then
+        log WARN "No video files found in $input_dir"
+        return 0
+    fi
+    
+    STATS[total_files]=${#video_files[@]}
+    log INFO "Found ${STATS[total_files]} video files"
+    
+    # Process files
+    if [[ ${CONFIG[parallel]} -eq 1 ]]; then
+        # Sequential processing
+        for file in "${video_files[@]}"; do
+            process_single_file "$file"
+        done
+    else
+        # Parallel processing
+        log INFO "Processing with ${CONFIG[parallel]} parallel jobs"
+        
+        local -a pids=()
+        local job_count=0
+        
+        for file in "${video_files[@]}"; do
+            if [[ ${#pids[@]} -ge ${CONFIG[parallel]} ]]; then
+                # Wait for any job to complete
+                wait -n
+                # Remove completed PIDs (bash 4.3+ feature)
+                for i in "${!pids[@]}"; do
+                    if ! kill -0 "${pids[i]}" 2>/dev/null; then
+                        unset "pids[i]"
+                    fi
+                done
+                pids=("${pids[@]}")  # Reindex array
+            fi
+            
+            # Start new job
+            ((job_count++))
+            (process_single_file "$file" "$job_count") &
+            pids+=($!)
+        done
+        
+        # Wait for remaining jobs
+        for pid in "${pids[@]}"; do
+            wait "$pid"
+        done
+    fi
+}
+
+show_statistics() {
+    local end_time duration
+    end_time=$(date +%s)
+    duration=$((end_time - STATS[start_time]))
+    
+    log INFO "=== TRANSCODING SUMMARY ==="
+    log INFO "Total files found: ${STATS[total_files]}"
+    log INFO "Successfully processed: ${STATS[processed]}"
+    log INFO "Skipped: ${STATS[skipped]}"
+    log INFO "Failed: ${STATS[failed]}"
+    log INFO "Total time: ${duration}s"
+    
+    if [[ ${STATS[processed]} -gt 0 ]] && command -v numfmt &> /dev/null; then
+        local input_readable output_readable compression_ratio
+        input_readable=$(numfmt --to=iec-i --suffix=B ${STATS[total_input_size]})
+        output_readable=$(numfmt --to=iec-i --suffix=B ${STATS[total_output_size]})
+        
+        if [[ ${STATS[total_input_size]} -gt 0 ]]; then
+            compression_ratio=$(echo "scale=1; ${STATS[total_output_size]} * 100 / ${STATS[total_input_size]}" | bc 2>/dev/null || echo "N/A")
+            log INFO "Size: $input_readable -> $output_readable (${compression_ratio}% of original)"
+        fi
+    fi
+}
+
+show_debug_info() {
+    log INFO "Configuration:"
+    for key in "${!CONFIG[@]}"; do
+        printf "  %-12s: %s\n" "$key" "${CONFIG[$key]}"
+    done
+    
+    log INFO "Video information:"
+    get_video_info "${CONFIG[input]}" | jq -r '
+        .streams[] | 
+        select(.codec_type=="video") | 
+        "  Resolution: \(.width)x\(.height)",
+        "  Codec: \(.codec_name)",
+        "  Bitrate: \(.bit_rate // "unknown") bps",
+        "  FPS: \(.r_frame_rate)"
+    ' 2>/dev/null || log WARN "jq not available for detailed video info"
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -i) CONFIG[input]="$2"; shift 2 ;;
+            -o) CONFIG[output]="$2"; shift 2 ;;
+            -e) CONFIG[extension]="$2"; shift 2 ;;
+            -c) CONFIG[codec]="$2"; shift 2 ;;
+            -q) CONFIG[crf]="$2"; shift 2 ;;
+            -p) CONFIG[preset]="$2"; shift 2 ;;
+            -t) CONFIG[tune]="$2"; shift 2 ;;
+            -a) CONFIG[audio_codec]="$2"; shift 2 ;;
+            -b) CONFIG[audio_bitrate]="$2"; shift 2 ;;
+            -s) CONFIG[scale]="$2"; shift 2 ;;
+            -r) CONFIG[fps]="$2"; shift 2 ;;
+            -T) CONFIG[tag]="$2"; shift 2 ;;
+            -R|--recursive) CONFIG[recursive]="true"; shift ;;
+            -j) CONFIG[parallel]="$2"; shift 2 ;;
+            -S) CONFIG[skip_existing]="false"; shift ;;
+            --min-size) CONFIG[min_size]="$2"; shift 2 ;;
+            --ext) CONFIG[extensions]="$2"; shift 2 ;;
+            -y) CONFIG[overwrite]="true"; shift ;;
+            -d) CONFIG[debug]="true"; shift ;;
+            --hw) CONFIG[hardware]="true"; shift ;;
+            --hdr) CONFIG[hdr]="true"; shift ;;
+            --2pass) CONFIG[two_pass]="true"; shift ;;
+            -h|--help) show_usage; exit 0 ;;
+            -v|--version) echo "v$VERSION"; exit 0 ;;
+            *) die "Unknown option: $1" ;;
         esac
     done
-    shift $((OPTIND-1))
-fi
-
-# Set quality mode
-case $QUALITY in
-    720) QUALITYMODE="-vf scale=-1:720"; TAG=" - 720";;
-esac
-
-# Generate output filename
-oFile=$(basename "${INPUT}" | sed "s/\.[^.]*$/${TAG}.${Extension}/")
-
-if [ -z "$OUTPUT" ]; then 
-    OUTPUT="${oFile}"
-else 
-    OUTPUT="${OUTPUT}.${Extension}"
-fi
-
-if [ -n "$REMOVEOPT" ]; then 
-    OUTPUT=$(basename "${oFile}" | sed -e "s/${REMOVE}//")
-fi
-
-if [ "$OVERWRITE" = "1" ]; then 
-    OWFLAG="-y"
-fi
-
-debugDisplay() {
-    echo "
-    INPUT=${INPUT}
-    OUTPUT=${OUTPUT}
-    TUNE=${TUNE}
-    PROFILE=${PROFILE}
-    PRESET=${PRESET}
-    CRF=${CRF}
-    OVERWRITE=${OVERWRITE}
-    bitRate=${bitRate}
-    bufRate=${bufRate}
-    maxRate=${maxRate}
-    QUALITYMODE=${QUALITYMODE}
-    Extension=${Extension}
-    "
 }
 
-convert2mp4() {
-    echo "Converting: ${INPUT} -> ${OUTPUT}"
+validate_input() {
+    [[ -n ${CONFIG[input]} ]] || die "Input file or directory is required (-i)"
+    [[ -e ${CONFIG[input]} ]] || die "Input path does not exist: ${CONFIG[input]}"
+    [[ -r ${CONFIG[input]} ]] || die "Cannot read input path: ${CONFIG[input]}"
     
-    ffmpeg \
-        -i "$INPUT" \
-        -threads 2 \
-        -profile:v "${PROFILE}" \
-        -movflags faststart \
-        -preset "${PRESET}" \
-        ${QUALITYMODE} \
-        -pix_fmt yuv420p \
-        -c:v libx264 \
-        -crf "${CRF}" \
-        -tune "${TUNE}" \
-        -b:v "${bitRate}k" \
-        -bufsize "${bufRate}k" \
-        -maxrate "${maxRate}k" \
-        -af "aresample=async=1:min_hard_comp=0.100000:first_pts=0" \
-        -b:a 192K \
-        -ar 44100 \
-        -c:a aac \
-        -ac 2 \
-        ${OWFLAG} \
-        "${OUTPUT}"
+    # Validate codec
+    case ${CONFIG[codec]} in
+        x264|x265|av1) ;;
+        *) die "Invalid codec: ${CONFIG[codec]} (must be x264, x265, or av1)" ;;
+    esac
     
-    if [ $? -eq 0 ]; then
-        echo -e "${cG}Conversion completed successfully!${cD}"
-        echo "Output file: ${OUTPUT}"
-        
-        # Display file sizes
-        if command -v du >/dev/null 2>&1; then
-            echo "Input size:  $(du -h "${INPUT}" | cut -f1)"
-            echo "Output size: $(du -h "${OUTPUT}" | cut -f1)"
+    # Validate parallel job count
+    if [[ ! ${CONFIG[parallel]} =~ ^[1-9][0-9]*$ ]] || [[ ${CONFIG[parallel]} -gt 16 ]]; then
+        die "Invalid parallel job count: ${CONFIG[parallel]} (must be 1-16)"
+    fi
+    
+    # For single files, set output filename if not provided
+    if [[ -f ${CONFIG[input]} ]]; then
+        if [[ -z ${CONFIG[output]} ]]; then
+            CONFIG[output]=$(generate_output_filename_for_file "${CONFIG[input]}")
         fi
-    else
-        echo -e "${cR}Conversion failed!${cD}"
-        exit 1
-    fi
-}
-
-checks() {
-    if [ "${DEBUG}" = "1" ]; then 
-        debugDisplay
-        exit 0
+        
+        # Check if output exists
+        if [[ -f ${CONFIG[output]} ]] && [[ ${CONFIG[overwrite]} != "true" ]]; then
+            die "Output file exists: ${CONFIG[output]} (use -y to overwrite)"
+        fi
     fi
     
-    if [ -z "${INPUT}" ]; then
-        echo -e "${cR}Error: No input file specified${cD}"
-        usage
-        exit 1
-    fi
-    
-    if [ ! -f "${INPUT}" ]; then
-        echo -e "${cR}Error: Input file '${INPUT}' does not exist${cD}"
-        exit 1
-    fi
-    
-    if [ ! -r "${INPUT}" ]; then
-        echo -e "${cR}Error: Cannot read input file '${INPUT}'${cD}"
-        exit 1
-    fi
-    
-    # Check if output file exists and overwrite is not set
-    if [ -f "${OUTPUT}" ] && [ "${OVERWRITE}" != "1" ]; then
-        echo -e "${cR}Error: Output file '${OUTPUT}' already exists. Use -y to overwrite${cD}"
-        exit 1
-    fi
-    
-    # Check if ffmpeg is available
-    if ! command -v ffmpeg >/dev/null 2>&1; then
-        echo -e "${cR}Error: ffmpeg is not installed or not in PATH${cD}"
-        exit 1
+    # For directories, validate output directory if specified
+    if [[ -d ${CONFIG[input]} ]] && [[ -n ${CONFIG[output]} ]]; then
+        if [[ -f ${CONFIG[output]} ]]; then
+            die "Output path is a file, but input is a directory: ${CONFIG[output]}"
+        fi
+        mkdir -p "${CONFIG[output]}" || die "Cannot create output directory: ${CONFIG[output]}"
     fi
 }
 
 main() {
-    checks
-    convert2mp4
+    parse_args "$@"
+    validate_input
+    check_dependencies
+    
+    STATS[start_time]=$(date +%s)
+    
+    if [[ ${CONFIG[debug]} == "true" ]]; then
+        show_debug_info
+        exit 0
+    fi
+    
+    if [[ -f ${CONFIG[input]} ]]; then
+        # Single file mode
+        log INFO "Single file mode"
+        log INFO "Transcoding: ${CONFIG[input]} -> ${CONFIG[output]}"
+        log INFO "Codec: ${CONFIG[codec]} | Quality: ${CONFIG[crf]} | Preset: ${CONFIG[preset]}"
+        
+        STATS[total_files]=1
+        
+        local start_time end_time duration
+        start_time=$(date +%s)
+        
+        # Build and execute ffmpeg command
+        local cmd
+        cmd=$(build_ffmpeg_command)
+        log DEBUG "Command: $cmd"
+        
+        if eval "$cmd"; then
+            end_time=$(date +%s)
+            duration=$((end_time - start_time))
+            
+            log INFO "Transcoding completed successfully in ${duration}s"
+            STATS[processed]=1
+            
+            # Show file sizes
+            if command -v du &> /dev/null; then
+                local input_size output_size
+                input_size=$(du -h "${CONFIG[input]}" | cut -f1)
+                output_size=$(du -h "${CONFIG[output]}" | cut -f1)
+                log INFO "Size: $input_size -> $output_size"
+            fi
+        else
+            STATS[failed]=1
+            die "Transcoding failed"
+        fi
+    else
+        # Directory mode
+        log INFO "Directory mode"
+        log INFO "Input directory: ${CONFIG[input]}"
+        [[ -n ${CONFIG[output]} ]] && log INFO "Output directory: ${CONFIG[output]}"
+        
+        process_directory "${CONFIG[input]}"
+        show_statistics
+    fi
 }
 
-main
+# Only run main if script is executed directly (not sourced)
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main "$@"
+fi
